@@ -4,10 +4,11 @@ from src.models import ExtractionResult
 from dotenv import load_dotenv
 load_dotenv()
 
-driver = GraphDatabase.driver(
-    os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-    auth=(os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD", "password123"))
-)
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password123")
+
+driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 def save_entities(result: ExtractionResult):
     with driver.session() as session:
@@ -45,7 +46,6 @@ def search_entities(query: str, limit: int = 10) -> list[dict]:
     with driver.session() as session:
         results = []
         seen = set()
-
         for word in words:
             rows = session.run("""
                 MATCH (e:Entity)
@@ -60,7 +60,6 @@ def search_entities(query: str, limit: int = 10) -> list[dict]:
                 if r["name"] not in seen:
                     seen.add(r["name"])
                     results.append(dict(r))
-
         return results[:limit]
 
 def get_related_entities(entity_name: str) -> list[dict]:
