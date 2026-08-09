@@ -8,6 +8,11 @@ load_dotenv()
 
 llm = ChatAnthropic(model="claude-sonnet-4-6", max_tokens=2000)
 
+def clean(text: str) -> str:
+    if not text:
+        return ""
+    return text.encode('utf-8', errors='ignore').decode('utf-8').replace('\u2028', ' ').replace('\u2029', ' ').replace('\u0000', '')
+
 class AgentState(TypedDict):
     query: str
     query_type: str
@@ -39,28 +44,20 @@ Reply with just the category name."""
 def retriever_node(state: AgentState) -> AgentState:
     print(f"[Retriever] Searching for: {state['query']}")
     from src.storage.neo4j_store import search_entities, get_related_entities
-
     direct_matches = search_entities(state["query"], limit=8)
-
     graph_context = []
     for match in direct_matches[:3]:
         related = get_related_entities(match["name"])
         if related:
             names = ", ".join(r["name"] for r in related[:5])
             graph_context.append(f"{match['name']} connects to: {names}")
-
     chunks = []
     for e in direct_matches:
-        chunks.append(
-            f"[{e['type'].upper()}] {e['name']}: {e['description']} (subtopic: {e['subtopic']})"
-        )
-
+        chunks.append(clean(f"[{e['type'].upper()}] {e['name']}: {e['description']} (subtopic: {e['subtopic']})"))
     if graph_context:
         chunks.append("Graph connections: " + " | ".join(graph_context))
-
     if not chunks:
         chunks = ["No matching entities found in knowledge base."]
-
     print(f"[Retriever] Found {len(direct_matches)} entities")
     return {**state, "retrieved_chunks": chunks, "retrieved_entities": direct_matches}
 
@@ -87,8 +84,8 @@ Reply with just the paper ID like 2305.10403, or reply "sufficient"."""
             neo4j_save(result)
             qdrant_save(result)
         gaps_filled = state.get("gaps_filled", []) + [doc.source_url]
-        new_chunk = f"[Newly fetched: {doc.title}]\n{doc.raw_text[:600]}"
-        print(f"[Research] Fetched and saved: {doc.title}")
+        new_chunk = clean(f"[Newly fetched: {doc.title}]\n{doc.raw_text[:600]}")
+        print(f"[Research] Fetched: {doc.title}")
         return {
             **state,
             "retrieved_chunks": state["retrieved_chunks"] + [new_chunk],
@@ -96,24 +93,21 @@ Reply with just the paper ID like 2305.10403, or reply "sufficient"."""
             "research_attempts": state["research_attempts"] + 1,
         }
     except Exception as e:
-        print(f"[Research] Fetch failed: {e}")
+        print(f"[Research] Failed: {e}")
         return {**state, "research_attempts": state["research_attempts"] + 1}
 
 def synthesis_node(state: AgentState) -> AgentState:
     print(f"[Synthesis] Writing answer...")
     sources_text = "\n".join(state["retrieved_chunks"][:8])
-    prompt = f"""You are answering from a personal AI knowledge graph.
-Answer this question using the retrieved knowledge below.
+    prompt = f"""Answer this question using the retrieved knowledge below.
 Add a citation [Source: entity name] for each key claim.
 
 Question: {state['query']}
 
 Retrieved knowledge:
-{sources_text}
-
-Write a clear, well-structured answer."""
+{sources_text}"""
     response = llm.invoke(prompt)
-    return {**state, "draft_answer": response.content}
+    return {**state, "draft_answer": clean(response.content)}
 
 def critic_node(state: AgentState) -> AgentState:
     print(f"[Critic] Checking answer...")

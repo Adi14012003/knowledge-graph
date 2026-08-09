@@ -6,16 +6,18 @@ load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
+def clean(text: str) -> str:
+    if not text:
+        return ""
+    return text.replace('\u2028', ' ').replace('\u2029', ' ').replace('\u0000', '')
+
 EXTRACTION_TOOL = {
     "name": "extract_knowledge",
     "description": "Extract structured entities from AI/ML content",
     "input_schema": {
         "type": "object",
         "properties": {
-            "is_relevant": {
-                "type": "boolean",
-                "description": "Is this content relevant to AI Engineering? Must always be true or false."
-            },
+            "is_relevant": {"type": "boolean"},
             "rejection_reason": {"type": "string"},
             "entities": {
                 "type": "array",
@@ -55,16 +57,12 @@ EXTRACTION_TOOL = {
 
 SYSTEM_PROMPT = """You are a knowledge extraction specialist for AI Engineering.
 CRITICAL: Always call extract_knowledge with is_relevant (true/false) and entities (array).
-Only use ASCII-safe text in all string fields. No special Unicode characters."""
-
-def clean_text(text: str) -> str:
-    """Remove non-ASCII characters that cause encoding issues."""
-    return text.encode('ascii', errors='ignore').decode('ascii')
+Extract people, tools, models, papers, concepts from AI/ML content.
+If content is relevant to AI Engineering, set is_relevant=true and extract entities."""
 
 def extract_entities(doc: Document) -> ExtractionResult:
-    text = clean_text(doc.raw_text[:8000])
-    title = clean_text(doc.title)
-
+    text = clean(doc.raw_text[:8000])
+    title = clean(doc.title)
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -74,58 +72,36 @@ def extract_entities(doc: Document) -> ExtractionResult:
             tool_choice={"type": "tool", "name": "extract_knowledge"},
             messages=[{
                 "role": "user",
-                "content": f"Extract knowledge from:\nTitle: {title}\nSource: {doc.source_url}\n\nContent:\n{text}"
+                "content": f"Extract knowledge from:\nTitle: {title}\nSource: {doc.source_url}\nType: {doc.source_type.value}\n\nContent:\n{text}"
             }]
         )
-
-        tool_block = None
-        for block in response.content:
-            if block.type == "tool_use":
-                tool_block = block
-                break
-
+        tool_block = next((b for b in response.content if b.type == "tool_use"), None)
         if not tool_block:
-            return ExtractionResult(
-                document_id=doc.id,
-                is_relevant=False,
-                entities=[],
-                rejection_reason="No tool call returned"
-            )
-
+            return ExtractionResult(document_id=doc.id, is_relevant=False, entities=[], rejection_reason="No tool call")
         raw = tool_block.input
-        is_relevant = raw.get("is_relevant", False)
         entities = []
-
         for e in raw.get("entities", []):
             try:
                 relationships = [Relationship(**r) for r in e.get("relationships", [])]
                 entity = Entity(
-                    name=clean_text(e["name"]),
+                    name=clean(e["name"]),
                     entity_type=EntityType(e["entity_type"]),
-                    description=clean_text(e["description"]),
+                    description=clean(e["description"]),
                     confidence=float(e["confidence"]),
-                    source_span=clean_text(e["source_span"]),
+                    source_span=clean(e["source_span"]),
                     source_document_id=doc.id,
                     subtopic=e["subtopic"],
                     relationships=relationships,
                 )
                 entities.append(entity)
-            except Exception as entity_error:
-                print(f"Skipping entity: {entity_error}")
-                continue
-
+            except Exception as ex:
+                print(f"Skipping entity: {ex}")
         return ExtractionResult(
             document_id=doc.id,
-            is_relevant=is_relevant,
+            is_relevant=raw.get("is_relevant", False),
             entities=entities,
             rejection_reason=raw.get("rejection_reason"),
         )
-
     except Exception as e:
         print(f"Extraction failed: {e}")
-        return ExtractionResult(
-            document_id=doc.id,
-            is_relevant=False,
-            entities=[],
-            rejection_reason=str(e)
-        )
+        return ExtractionResult(document_id=doc.id, is_relevant=False, entities=[], rejection_reason=str(e))
